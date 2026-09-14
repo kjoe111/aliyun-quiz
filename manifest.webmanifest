@@ -6,7 +6,7 @@
   "display":"standalone",
   "background_color":"#f5f6f8",
   "theme_color":"#ffffff",
-  "description":"750道阿里云题库，支持错题次数归类、收藏、续做和离线使用。",
+  "description":"750道阿里云题库，支持错题次数归类、收藏、续做、离线使用和跨设备云同步。",
   "icons":[
     {"src":"icon-192.png","sizes":"192x192","type":"image/png"},
     {"src":"icon-512.png","sizes":"512x512","type":"image/png"}
