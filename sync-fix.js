@@ -1,6 +1,7 @@
 (()=>{
-  const DIRTY_KEY='aliyun_quiz_cloud_dirty_v1';
+  const DIRTY_KEY='aliyun_quiz_cloud_dirty_v2';
   let localDirty=false;
+  let trackingReady=false;
   try{localDirty=localStorage.getItem(DIRTY_KEY)==='1';}catch(e){}
 
   const setDirty=v=>{localDirty=!!v;try{localStorage.setItem(DIRTY_KEY,localDirty?'1':'0')}catch(e){}};
@@ -9,11 +10,19 @@
     try{await idbSet(state)}catch(e){}
   };
 
+  const originalInitCloud=initCloud;
+  initCloud=async function(){
+    try{return await originalInitCloud();}
+    finally{trackingReady=true;}
+  };
+
   localSave=function(){
-    setDirty(true);
+    // 首次加载/刷新只是在恢复本机缓存，不应被判定为“本机新修改”。
+    // 只有初始化完成后的真实用户操作才标记 dirty。
+    if(trackingReady)setDirty(true);
     try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}
     idbSet(state);
-    schedulePush();
+    if(trackingReady)schedulePush();
   };
 
   schedulePush=function(){
@@ -47,8 +56,8 @@
 
       if(data?.state){
         suppressPush=true;
-        // 本机没有未上传修改时，云端是导航位置和当前模式的唯一真源。
-        // 这样旧手机停在第5题时，不会再把电脑已同步的第30题覆盖掉。
+        // 没有本机新修改：云端完整覆盖导航状态，刷新/同步后直接跟随另一设备最新进度。
+        // 有本机新修改：才做安全合并，避免丢失刚刚离线产生的答题/收藏等数据。
         state=localDirty?merge(state,data.state):norm(data.state);
         await persistLocal();
         suppressPush=false;
@@ -72,7 +81,4 @@
   clearTimeout(pushTimer);
   const btn=document.getElementById('syncBtn');
   if(btn)btn.onclick=syncNow;
-
-  // 补丁加载后，如果当前已经登录，立即拉一次云端状态。
-  setTimeout(()=>{if(user)syncNow()},0);
 })();
