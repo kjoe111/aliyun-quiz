@@ -1,62 +1,70 @@
 (()=>{
-  const DIRTY_KEY='aliyun_quiz_cloud_data_dirty_v4';
-  const NAV_DIRTY_KEY='aliyun_quiz_cloud_nav_dirty_v4';
-  let dataDirty=false,navDirty=false,trackingReady=false,lastNavSig='';
-  try{dataDirty=localStorage.getItem(DIRTY_KEY)==='1';navDirty=localStorage.getItem(NAV_DIRTY_KEY)==='1'}catch(e){}
-  const setDataDirty=v=>{dataDirty=!!v;try{localStorage.setItem(DIRTY_KEY,localDirtyValue(dataDirty))}catch(e){}};
-  const setNavDirty=v=>{navDirty=!!v;try{localStorage.setItem(NAV_DIRTY_KEY,localDirtyValue(navDirty))}catch(e){}};
-  const localDirtyValue=v=>v?'1':'0';
-  const navSig=()=>`${state.mode}|${state.positions?.[state.mode]??state.index??0}`;
-  const currentNav=()=>{const l=list(),idx=Math.max(0,Math.min(Number(state.positions?.[state.mode]??state.index??0),Math.max(0,l.length-1)));return{mode:state.mode,index:idx,questionId:l[idx]?.id??null}};
-  const persistLocal=async()=>{try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}try{await idbSet(state)}catch(e){}};
-  const applyNav=(mode,index)=>{if(!MODES.includes(mode))return;state.mode=mode;state.positions=state.positions||structuredClone(DEF.positions);state.positions[mode]=Math.max(0,Number(index)||0);state.index=state.positions[mode];lastNavSig=navSig()};
+  /* v5: local-first sync. Cloud is never allowed to change navigation while answering. */
+  const DATA_DIRTY='aliyun_quiz_data_dirty_v5';
+  const NAV_DIRTY='aliyun_quiz_nav_dirty_v5';
+  let dataDirty=false,navDirty=false,ready=false,uploadTimer=null,uploading=false,lastSig='';
+  try{dataDirty=localStorage.getItem(DATA_DIRTY)==='1';navDirty=localStorage.getItem(NAV_DIRTY)==='1'}catch(e){}
+  const flag=(k,v)=>{try{localStorage.setItem(k,v?'1':'0')}catch(e){}};
+  const sig=()=>`${state.mode}|${Number(state.positions?.[state.mode]??state.index??0)}`;
+  const persist=async()=>{try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}try{await idbSet(state)}catch(e){}};
+  const nav=()=>{const l=list();const i=Math.max(0,Math.min(Number(state.positions?.[state.mode]??state.index??0),Math.max(0,l.length-1)));return{mode:state.mode,index:i,questionId:l[i]?.id??null}};
+  const applyNav=(m,i)=>{if(!MODES.includes(m))return;state.mode=m;state.positions=state.positions||structuredClone(DEF.positions);state.positions[m]=Math.max(0,Number(i)||0);state.index=state.positions[m];lastSig=sig()};
   const originalInitCloud=initCloud;
-  initCloud=async function(){try{return await originalInitCloud()}finally{trackingReady=true;lastNavSig=navSig()}};
-  setTimeout(()=>{if(!trackingReady){trackingReady=true;lastNavSig=navSig()}},1800);
+  initCloud=async function(){try{return await originalInitCloud()}finally{ready=true;lastSig=sig()}};
+  setTimeout(()=>{if(!ready){ready=true;lastSig=sig()}},2000);
+
+  /* Every local save is authoritative. No pull is started from here. */
   localSave=function(){
-    if(trackingReady){const sig=navSig();if(lastNavSig&&sig!==lastNavSig)setNavDirty(true);lastNavSig=sig;setDataDirty(true)}
-    try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}idbSet(state);if(trackingReady)schedulePush();
+    if(ready){const s=sig();dataDirty=true;flag(DATA_DIRTY,true);if(lastSig&&s!==lastSig){navDirty=true;flag(NAV_DIRTY,true)}lastSig=s}
+    try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}idbSet(state);
+    if(ready)schedulePush();
   };
-  schedulePush=function(){if(suppressPush||!user||(!dataDirty&&!navDirty))return;clearTimeout(pushTimer);pushTimer=setTimeout(pushNow,1800)};
-  async function fetchCloud(){const {data,error}=await sb.from('quiz_progress').select('state,updated_at,device_id,nav_mode,nav_index,nav_question_id,nav_version,nav_updated_at,nav_device_id').eq('user_id',user.id).maybeSingle();if(error)throw error;return data}
-  async function writeCloud(cloud){
-    const localNav=currentNav();
-    let merged=cloud?.state?merge(state,cloud.state):norm(state);
-    // 关键：只要本机导航发生过真实变化，本机当前位置在本次上传全过程中保持权威，
-    // 不能因为前一次 RPC/自动同步返回较慢而重新套用旧云端位置。
-    if(navDirty)applyNav(localNav.mode,localNav.index);
-    else if(cloud?.nav_mode!=null)applyNav(cloud.nav_mode,cloud.nav_index);
-    else if(cloud?.state){const legacy=norm(cloud.state);applyNav(legacy.mode,legacy.positions?.[legacy.mode]??legacy.index??0)}
-    merged.mode=state.mode;merged.positions=merged.positions||structuredClone(DEF.positions);merged.positions[state.mode]=state.index;merged.index=state.index;state=norm(merged);applyNav(merged.mode,merged.index);
-    const n=currentNav(),initializeNav=!cloud||cloud.nav_mode==null;
-    const {data,error}=await sb.rpc('sync_quiz_progress',{p_state:state,p_device_id:deviceId,p_nav_changed:navDirty||initializeNav,p_nav_mode:n.mode,p_nav_index:n.index,p_nav_question_id:n.questionId});if(error)throw error;
-    setDataDirty(false);setNavDirty(false);lastNavSig=navSig();await persistLocal();return data;
-  }
-  pushNow=async function(){if(!sb||!user)return false;try{status('正在上传…');const cloud=await fetchCloud();await writeCloud(cloud);status('已同步 · '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),'ok');return true}catch(e){status('上传失败：'+e.message,'err');return false}};
-  syncNow=async function(){
-    if(!sb||!user||syncing)return;syncing=true;status('正在同步…');
-    // 在网络请求开始前冻结本机 dirty/nav 状态。网络返回期间如果用户又做了题，绝不能用旧云端覆盖。
-    const dirtyAtStart=dataDirty,navDirtyAtStart=navDirty,navAtStart=currentNav();
+
+  schedulePush=function(){
+    if(suppressPush||!user||(!dataDirty&&!navDirty))return;
+    clearTimeout(uploadTimer);uploadTimer=setTimeout(()=>pushNow(),1200);
+  };
+
+  async function cloudRow(){const {data,error}=await sb.from('quiz_progress').select('state,nav_mode,nav_index,nav_question_id,nav_version,nav_updated_at,device_id').eq('user_id',user.id).maybeSingle();if(error)throw error;return data}
+
+  /* Upload is serialized and never applies cloud navigation back to the page. */
+  pushNow=async function(){
+    if(!sb||!user)return false;if(uploading){schedulePush();return false}uploading=true;
+    const navSnapshot=nav(),sigSnapshot=sig(),dataSnapshot=dataDirty,navSnapshotDirty=navDirty;
     try{
-      const cloud=await fetchCloud();
-      const changedWhileWaiting=(navSig()!==`${navAtStart.mode}|${navAtStart.index}`)||navDirty!==navDirtyAtStart||dataDirty!==dirtyAtStart;
-      if(changedWhileWaiting||navDirty){
-        // 用户正在做题：这次旧 pull 作废，只安排稍后的上传，不改变当前页面。
-        schedulePush();status('本机有新进度，等待上传…','ok');return;
-      }
-      suppressPush=true;
-      state=cloud?.state?merge(state,cloud.state):norm(state);
-      if(cloud?.nav_mode!=null)applyNav(cloud.nav_mode,cloud.nav_index);
-      else if(cloud?.state){const legacy=norm(cloud.state);applyNav(legacy.mode,legacy.positions?.[legacy.mode]??legacy.index??0)}
-      await persistLocal();suppressPush=false;
-      if(dataDirty||!cloud||cloud.nav_mode==null)await writeCloud(cloud);
-      document.querySelectorAll('.chip').forEach(c=>c.classList.toggle('active',c.dataset.mode===state.mode));render();
-      status('已从云端更新 · '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),'ok');
-    }catch(e){suppressPush=false;status('同步失败：'+e.message,'err')}finally{syncing=false}
+      status('正在上传…');
+      const cloud=await cloudRow();
+      const merged=cloud?.state?merge(state,cloud.state):norm(state);
+      merged.mode=navSnapshot.mode;merged.positions=merged.positions||structuredClone(DEF.positions);merged.positions[navSnapshot.mode]=navSnapshot.index;merged.index=navSnapshot.index;
+      const {error}=await sb.rpc('sync_quiz_progress',{p_state:merged,p_device_id:deviceId,p_nav_changed:navSnapshotDirty||!cloud?.nav_mode,p_nav_mode:navSnapshot.mode,p_nav_index:navSnapshot.index,p_nav_question_id:navSnapshot.questionId});if(error)throw error;
+      /* Clear only the snapshot we actually uploaded. If user moved meanwhile, keep dirty. */
+      if(sig()===sigSnapshot){if(dataSnapshot){dataDirty=false;flag(DATA_DIRTY,false)}if(navSnapshotDirty){navDirty=false;flag(NAV_DIRTY,false)}}
+      await persist();status('已上传 · '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),'ok');return true;
+    }catch(e){status('上传失败：'+e.message,'err');return false}
+    finally{uploading=false;if(dataDirty||navDirty)schedulePush()}
   };
-  cloudPullAndMerge=syncNow;clearTimeout(pushTimer);
+
+  /* Pull is explicit/startup only. It is forbidden while local changes are pending. */
+  syncNow=async function(){
+    if(!sb||!user||syncing)return;if(dataDirty||navDirty||uploading){schedulePush();status('本机有新进度，先上传，不回退当前位置','ok');return}
+    syncing=true;status('正在读取云端…');const before=sig();
+    try{
+      const cloud=await cloudRow();if(!cloud){await pushNow();return}
+      /* If the user touched navigation while the request was in flight, discard the pull. */
+      if(sig()!==before){schedulePush();return}
+      suppressPush=true;state=cloud.state?merge(state,cloud.state):norm(state);
+      if(cloud.nav_mode!=null)applyNav(cloud.nav_mode,cloud.nav_index);
+      await persist();suppressPush=false;
+      document.querySelectorAll('.chip').forEach(c=>c.classList.toggle('active',c.dataset.mode===state.mode));render();
+      status('已读取云端 · '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),'ok');
+    }catch(e){suppressPush=false;status('同步失败：'+e.message,'err')}
+    finally{syncing=false}
+  };
+
+  /* Disable old background pull behavior. Background/online events upload only. */
+  cloudPullAndMerge=async()=>{if(dataDirty||navDirty)schedulePush()};
+  clearTimeout(pushTimer);clearTimeout(uploadTimer);
   const btn=document.getElementById('syncBtn');if(btn)btn.onclick=syncNow;
-  // 后台恢复给正在进行的本机操作留出时间；恢复同步不得抢在用户提交/翻题的保存之前。
-  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&user)setTimeout(syncNow,1000)});
-  window.addEventListener('online',()=>{if(user)setTimeout(syncNow,1000)});
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'&&user&&(dataDirty||navDirty))pushNow();});
+  window.addEventListener('online',()=>{if(user&&(dataDirty||navDirty))schedulePush()});
 })();
