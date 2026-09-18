@@ -1,4 +1,4 @@
-const CACHE='aliyun-quiz-v14';
+const CACHE='aliyun-quiz-v15';
 const ASSETS=['./','./index.html','./manifest.webmanifest','./icon-192.png','./icon-512.png'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',e=>e.waitUntil((async()=>{for(const k of await caches.keys())if(k!==CACHE&&k!=='aliyun-quiz-question-data-v1')await caches.delete(k);await self.clients.claim();for(const c of await self.clients.matchAll({type:'window'}))c.navigate(c.url).catch(()=>{})})()));
